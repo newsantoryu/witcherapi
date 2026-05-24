@@ -18,6 +18,13 @@ class TestClientInfo:
         assert isinstance(sample_client_info.connected_at, datetime)
         assert isinstance(sample_client_info.last_heartbeat, datetime)
     
+    def test_client_info_rtt_initialization(self, sample_client_info):
+        """Test ClientInfo RTT fields initialize to zero."""
+        assert sample_client_info.rtt_ms == 0.0
+        assert sample_client_info.jitter_ms == 0.0
+        assert sample_client_info.packet_loss == 0.0
+        assert sample_client_info._ping_timestamps == {}
+    
     def test_is_alive_within_timeout(self, sample_client_info):
         """Test is_alive returns True when within timeout."""
         assert sample_client_info.is_alive(timeout_seconds=60) is True

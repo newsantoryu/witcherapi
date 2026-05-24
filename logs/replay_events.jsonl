@@ -1,0 +1,1 @@
+{"timestamp": 1779643110.7835133, "client_id": "7f1c6b56-6bd6-4c61-82ed-48e5187ed0d6", "raw_message": "INPUT:PANIC_BUTTON", "parsed": {"message_type": "INPUT", "event": "PANIC_BUTTON", "data": null}}

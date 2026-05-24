@@ -31,10 +31,10 @@ sudo touch /dev/shm/witcher_events.log
 sudo chmod 666 /dev/shm/witcher_events.log
 
 # Start the API
-echo -e "${GREEN}[Cyber-Visceral Link]${NC} API starting on http://0.0.0.0:8000"
-echo -e "${GREEN}[Cyber-Visceral Link]${NC} WebSocket endpoint: ws://0.0.0.0:8000/ws"
-echo -e "${GREEN}[Cyber-Visceral Link]${NC} API docs: http://0.0.0.0:8000/docs"
+echo -e "${GREEN}[Cyber-Visceral Link]${NC} API starting on http://0.0.0.0:8001"
+echo -e "${GREEN}[Cyber-Visceral Link]${NC} WebSocket endpoint: ws://0.0.0.0:8001/ws"
+echo -e "${GREEN}[Cyber-Visceral Link]${NC} API docs: http://0.0.0.0:8001/docs"
 echo ""
 
 # Run with uvicorn
-uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+uvicorn app.main:app --host 0.0.0.0 --port 8001 --reload

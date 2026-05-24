@@ -76,6 +76,19 @@ class TestWebSocketManager:
         assert result is False
         assert client_id not in websocket_manager_instance.active_connections
     
+    async def test_send_message_timeout(self, websocket_manager_instance, mock_websocket):
+        """Test sending message when WebSocket times out."""
+        client_ip = "127.0.0.1"
+        client_id = await websocket_manager_instance.connect(mock_websocket, client_ip)
+        
+        # Make send_text raise asyncio.TimeoutError
+        mock_websocket.send_text.side_effect = asyncio.TimeoutError()
+        
+        result = await websocket_manager_instance.send_message(client_id, "OUTPUT:GORE_FLASH")
+        
+        assert result is False
+        assert client_id not in websocket_manager_instance.active_connections
+    
     async def test_broadcast_no_clients(self, websocket_manager_instance):
         """Test broadcasting with no clients."""
         message = "OUTPUT:GORE_FLASH"
@@ -167,6 +180,90 @@ class TestWebSocketManager:
         
         # Client should still be connected (invalid format doesn't disconnect)
         assert client_id in websocket_manager_instance.active_connections
+    
+    async def test_receive_message_rate_limit_exceeded(self, websocket_manager_instance, mock_websocket):
+        """Test receiving message when rate limit is exceeded."""
+        from app.state import system_state
+        from app.config import settings
+        
+        client_ip = "127.0.0.1"
+        client_id = await websocket_manager_instance.connect(mock_websocket, client_ip)
+        
+        # Get the client and set rate limit to exceeded
+        client = await system_state.get_client(client_id)
+        client.events_this_second = settings.rate_limit_events + 1
+        
+        # Send a message
+        await websocket_manager_instance.receive_message(client_id, "INPUT:PANIC_BUTTON")
+        
+        # Client should be disconnected due to rate limit
+        assert client_id not in websocket_manager_instance.active_connections
+    
+    async def test_receive_message_heartbeat_pong(self, websocket_manager_instance, mock_websocket):
+        """Test receiving HEARTBEAT:PONG message and RTT calculation."""
+        from app.state import system_state
+        import time
+        
+        client_ip = "127.0.0.1"
+        client_id = await websocket_manager_instance.connect(mock_websocket, client_ip)
+        
+        # Get the client and set a ping timestamp
+        client = await system_state.get_client(client_id)
+        ping_id = str(time.time())
+        ping_time = time.time()
+        client._ping_timestamps[ping_id] = ping_time
+        
+        # Set previous RTT to test jitter calculation
+        client.rtt_ms = 40.0
+        
+        # Send HEARTBEAT:PONG message
+        await websocket_manager_instance.receive_message(client_id, "HEARTBEAT:PONG")
+        
+        # Verify RTT was calculated
+        assert client.rtt_ms > 0
+        # Verify jitter was calculated (difference from previous RTT)
+        assert client.jitter_ms >= 0
+        # Verify ping timestamp was removed
+        assert ping_id not in client._ping_timestamps
+        # Verify heartbeat was updated
+        assert client.is_alive(timeout_seconds=60)
+    
+    async def test_receive_message_replay_log(self, websocket_manager_instance, mock_websocket):
+        """Test receiving message writes to replay log when enabled."""
+        from app.state import system_state
+        from app.config import settings
+        from unittest.mock import AsyncMock, MagicMock, patch
+        import json
+        
+        client_ip = "127.0.0.1"
+        client_id = await websocket_manager_instance.connect(mock_websocket, client_ip)
+        
+        # Enable replay log
+        with patch.object(settings, 'enable_replay_log', True):
+            # Create async mock for file operations
+            mock_file = AsyncMock()
+            mock_file.write = AsyncMock()
+            
+            # Create proper async context manager
+            mock_context = AsyncMock()
+            mock_context.__aenter__.return_value = mock_file
+            mock_context.__aexit__.return_value = None
+            
+            with patch('aiofiles.open', return_value=mock_context):
+                message = "INPUT:PANIC_BUTTON"
+                
+                await websocket_manager_instance.receive_message(client_id, message)
+                
+                # Verify write was called
+                mock_file.write.assert_called_once()
+                
+                # Verify the written data contains expected fields
+                written_data = mock_file.write.call_args[0][0]
+                replay_event = json.loads(written_data)
+                assert "timestamp" in replay_event
+                assert replay_event["client_id"] == client_id
+                assert replay_event["raw_message"] == message
+                assert "parsed" in replay_event
     
     async def test_register_handler(self, websocket_manager_instance):
         """Test registering message handler."""
