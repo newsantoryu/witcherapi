@@ -6,6 +6,10 @@ from typing import Dict, Set, Optional
 from datetime import datetime
 from dataclasses import dataclass, field
 import logging
+import time
+from collections import deque
+
+from app.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -18,21 +22,57 @@ class ClientInfo:
     last_heartbeat: datetime
     ip_address: str
     
+    # RTT Tracking
+    rtt_ms: float = 0.0
+    jitter_ms: float = 0.0
+    packet_loss: float = 0.0
+    _ping_timestamps: Dict[str, float] = field(default_factory=dict)
+    
+    # Rate Limiting
+    events_this_second: int = 0
+    bytes_this_second: int = 0
+    last_rate_limit_reset: float = field(default_factory=time.time)
+    
     def is_alive(self, timeout_seconds: int = 60) -> bool:
         """Check if client is still alive based on heartbeat."""
         delta = datetime.now() - self.last_heartbeat
         return delta.total_seconds() < timeout_seconds
+        
+    def check_rate_limit(self, payload_size: int) -> bool:
+        """Check if client has exceeded rate limits."""
+        now = time.time()
+        if now - self.last_rate_limit_reset >= 1.0:
+            self.events_this_second = 0
+            self.bytes_this_second = 0
+            self.last_rate_limit_reset = now
+            
+        self.events_this_second += 1
+        self.bytes_this_second += payload_size
+        
+        if self.events_this_second > settings.rate_limit_events:
+            return False
+        if self.bytes_this_second > settings.rate_limit_payload:
+            return False
+            
+        return True
 
 
 @dataclass
 class SystemState:
     """Global application state."""
     clients: Dict[str, ClientInfo] = field(default_factory=dict)
-    event_queue: asyncio.Queue = field(default_factory=asyncio.Queue)
+    event_queue: asyncio.Queue = field(default_factory=lambda: asyncio.Queue(maxsize=settings.queue_size))
     is_running: bool = False
+    
+    # Metrics
     total_events_processed: int = 0
     total_messages_sent: int = 0
     total_messages_received: int = 0
+    dropped_events: int = 0
+    reconnects: int = 0
+    peak_latency_ms: float = 0.0
+    avg_latency_ms: float = 0.0
+    _latency_history: deque = field(default_factory=lambda: deque(maxlen=100))
     
     # Lock for thread-safe operations
     _lock: asyncio.Lock = field(default_factory=asyncio.Lock)
@@ -102,7 +142,13 @@ class SystemState:
         """Increment messages received counter."""
         self.total_messages_received += 1
     
-    async def get_stats(self) -> Dict[str, int]:
+    async def record_latency(self, latency_ms: float) -> None:
+        """Record latency for metrics."""
+        self._latency_history.append(latency_ms)
+        self.peak_latency_ms = max(self.peak_latency_ms, latency_ms)
+        self.avg_latency_ms = sum(self._latency_history) / len(self._latency_history)
+
+    async def get_stats(self) -> Dict[str, float]:
         """Get system statistics."""
         async with self._lock:
             return {
@@ -110,7 +156,11 @@ class SystemState:
                 "events_processed": self.total_events_processed,
                 "messages_sent": self.total_messages_sent,
                 "messages_received": self.total_messages_received,
-                "queue_size": self.event_queue.qsize()
+                "queue_size": self.event_queue.qsize(),
+                "dropped_events": self.dropped_events,
+                "reconnects": self.reconnects,
+                "avg_latency_ms": round(self.avg_latency_ms, 2),
+                "peak_latency_ms": round(self.peak_latency_ms, 2)
             }
 
 

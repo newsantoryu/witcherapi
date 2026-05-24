@@ -84,10 +84,17 @@ class WebSocketManager:
             return False
         
         try:
-            await self.active_connections[client_id].send_text(message)
+            await asyncio.wait_for(
+                self.active_connections[client_id].send_text(message),
+                timeout=settings.client_timeout
+            )
             await system_state.increment_messages_sent()
             logger.debug(f"[MESSAGE SENT] To {client_id}: {message}")
             return True
+        except asyncio.TimeoutError:
+            logger.error(f"[TIMEOUT] Sending to {client_id}")
+            await self.disconnect(client_id)
+            return False
         except Exception as e:
             logger.error(f"Error sending to {client_id}: {e}")
             await self.disconnect(client_id)
@@ -130,16 +137,56 @@ class WebSocketManager:
         """
         await system_state.increment_messages_received()
         
+        # Rate limiting check
+        client = await system_state.get_client(client_id)
+        if client and not client.check_rate_limit(len(message)):
+            logger.warning(f"[RATE LIMIT] Client {client_id} exceeded limits")
+            await self.disconnect(client_id)
+            return
+            
         # Validate payload size
         if not MessageParser.validate_payload(message, settings.max_payload_size):
             logger.warning(f"[PAYLOAD EXCEEDED] Client {client_id}: {len(message)} bytes")
             await self.disconnect(client_id)
+            return
+            
+        # Handle PONG for RTT calculation
+        if message == "HEARTBEAT:PONG":
+            if client and client._ping_timestamps:
+                # Get the oldest ping timestamp
+                ping_id = min(client._ping_timestamps.keys())
+                ping_time = client._ping_timestamps.pop(ping_id)
+                
+                rtt = (time.time() - ping_time) * 1000  # ms
+                
+                # Calculate jitter (difference between current RTT and previous RTT)
+                if client.rtt_ms > 0:
+                    client.jitter_ms = abs(rtt - client.rtt_ms)
+                    
+                client.rtt_ms = rtt
+                await system_state.record_latency(rtt)
+                await system_state.update_heartbeat(client_id)
             return
         
         # Parse message
         try:
             parsed = MessageParser.parse(message)
             logger.info(f"[INPUT RECEIVED] From {client_id}: {parsed}")
+            
+            # Log for replay system
+            if settings.enable_replay_log:
+                try:
+                    import aiofiles
+                    async with aiofiles.open(settings.replay_log_path, mode='a') as f:
+                        replay_event = {
+                            "timestamp": time.time(),
+                            "client_id": client_id,
+                            "raw_message": message,
+                            "parsed": parsed
+                        }
+                        await f.write(json.dumps(replay_event) + '\n')
+                except Exception as e:
+                    logger.error(f"Failed to write replay log: {e}")
             
             # Update heartbeat
             await system_state.update_heartbeat(client_id)
@@ -182,6 +229,7 @@ class WebSocketManager:
     
     async def _heartbeat_loop(self) -> None:
         """Heartbeat monitoring loop."""
+        import time
         while True:
             try:
                 await asyncio.sleep(settings.heartbeat_interval)
@@ -189,7 +237,30 @@ class WebSocketManager:
                 # Send ping to all clients
                 for client_id in list(self.active_connections.keys()):
                     try:
-                        await self.active_connections[client_id].send_text("HEARTBEAT:PING")
+                        client = await system_state.get_client(client_id)
+                        if client:
+                            ping_id = str(time.time())
+                            client._ping_timestamps[ping_id] = time.time()
+                            
+                            # Clean up old unacknowledged pings (packet loss)
+                            now = time.time()
+                            lost_pings = [pid for pid, ts in client._ping_timestamps.items() 
+                                        if now - ts > settings.heartbeat_timeout]
+                            
+                            for pid in lost_pings:
+                                client._ping_timestamps.pop(pid)
+                                
+                            if lost_pings:
+                                total_pings = len(client._ping_timestamps) + len(lost_pings)
+                                client.packet_loss = len(lost_pings) / total_pings if total_pings > 0 else 0.0
+                                
+                        await asyncio.wait_for(
+                            self.active_connections[client_id].send_text("HEARTBEAT:PING"),
+                            timeout=settings.client_timeout
+                        )
+                    except asyncio.TimeoutError:
+                        logger.error(f"[TIMEOUT] Heartbeat to {client_id}")
+                        await self.disconnect(client_id)
                     except Exception as e:
                         logger.error(f"Heartbeat failed for {client_id}: {e}")
                         await self.disconnect(client_id)

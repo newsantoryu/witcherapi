@@ -3,6 +3,7 @@ Main FastAPI application for Cyber-Visceral Link.
 """
 import asyncio
 import logging
+import structlog
 from contextlib import asynccontextmanager
 from typing import Dict, Any
 
@@ -17,12 +18,30 @@ from app.protocol import MessageParser, ProtocolError
 from app.log_reader import log_reader
 from app.input_handler import input_handler
 
-# Configure logging
-logging.basicConfig(
-    level=getattr(logging, settings.log_level),
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger(__name__)
+# Configure structured logging
+if settings.structured_logging:
+    structlog.configure(
+        processors=[
+            structlog.stdlib.add_log_level,
+            structlog.stdlib.add_logger_name,
+            structlog.processors.TimeStamper(fmt="iso"),
+            structlog.processors.JSONRenderer()
+        ],
+        logger_factory=structlog.stdlib.LoggerFactory(),
+        wrapper_class=structlog.stdlib.BoundLogger,
+        cache_logger_on_first_use=True,
+    )
+    logging.basicConfig(
+        level=getattr(logging, settings.log_level),
+        format="%(message)s"
+    )
+    logger = structlog.get_logger(__name__)
+else:
+    logging.basicConfig(
+        level=getattr(logging, settings.log_level),
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    )
+    logger = logging.getLogger(__name__)
 
 
 @asynccontextmanager
@@ -93,7 +112,9 @@ async def health_check():
     stats = await system_state.get_stats()
     return {
         "status": "healthy",
-        "stats": stats
+        "clients": stats["connected_clients"],
+        "queue_size": stats["queue_size"],
+        "latency_avg": stats["avg_latency_ms"]
     }
 
 
@@ -218,7 +239,10 @@ async def get_clients():
             "connected_at": client_info.connected_at.isoformat(),
             "last_heartbeat": client_info.last_heartbeat.isoformat(),
             "ip_address": client_info.ip_address,
-            "is_alive": client_info.is_alive(settings.heartbeat_timeout)
+            "is_alive": client_info.is_alive(settings.heartbeat_timeout),
+            "rtt_ms": round(client_info.rtt_ms, 2),
+            "jitter_ms": round(client_info.jitter_ms, 2),
+            "packet_loss": round(client_info.packet_loss, 4)
         })
     
     return {
@@ -229,6 +253,10 @@ async def get_clients():
 
 if __name__ == "__main__":
     import uvicorn
+    import uvloop
+    
+    # Set uvloop as the event loop policy
+    asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
     
     uvicorn.run(
         "app.main:app",

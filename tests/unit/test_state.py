@@ -33,6 +33,44 @@ class TestClientInfo:
         # Set heartbeat to exactly timeout
         sample_client_info.last_heartbeat = datetime.now() - timedelta(seconds=60)
         assert sample_client_info.is_alive(timeout_seconds=60) is False
+        
+    def test_check_rate_limit_events(self, sample_client_info):
+        """Test rate limiting by event count."""
+        from app.config import settings
+        
+        # Should allow up to rate_limit_events
+        for _ in range(settings.rate_limit_events):
+            assert sample_client_info.check_rate_limit(10) is True
+            
+        # Next one should fail
+        assert sample_client_info.check_rate_limit(10) is False
+        
+    def test_check_rate_limit_payload(self, sample_client_info):
+        """Test rate limiting by payload size."""
+        from app.config import settings
+        
+        # Send a payload just under the limit
+        assert sample_client_info.check_rate_limit(settings.rate_limit_payload - 10) is True
+        
+        # Next one should exceed the limit
+        assert sample_client_info.check_rate_limit(20) is False
+        
+    def test_check_rate_limit_reset(self, sample_client_info):
+        """Test rate limit resets after 1 second."""
+        from app.config import settings
+        import time
+        
+        # Exceed limit
+        for _ in range(settings.rate_limit_events + 1):
+            sample_client_info.check_rate_limit(10)
+            
+        assert sample_client_info.check_rate_limit(10) is False
+        
+        # Force reset by changing last_rate_limit_reset
+        sample_client_info.last_rate_limit_reset = time.time() - 1.1
+        
+        # Should be allowed again
+        assert sample_client_info.check_rate_limit(10) is True
 
 
 @pytest.mark.unit
@@ -183,6 +221,15 @@ class TestSystemState:
         initial = system_state_instance.total_messages_received
         await system_state_instance.increment_messages_received()
         assert system_state_instance.total_messages_received == initial + 1
+        
+    async def test_record_latency(self, system_state_instance):
+        """Test recording latency metrics."""
+        await system_state_instance.record_latency(10.0)
+        await system_state_instance.record_latency(20.0)
+        
+        assert system_state_instance.peak_latency_ms == 20.0
+        assert system_state_instance.avg_latency_ms == 15.0
+        assert len(system_state_instance._latency_history) == 2
     
     async def test_get_stats(self, system_state_instance):
         """Test getting system statistics."""
@@ -191,6 +238,7 @@ class TestSystemState:
         await system_state_instance.increment_events_processed()
         await system_state_instance.increment_messages_sent()
         await system_state_instance.increment_messages_received()
+        await system_state_instance.record_latency(15.5)
         
         stats = await system_state_instance.get_stats()
         
@@ -199,6 +247,10 @@ class TestSystemState:
         assert stats["messages_sent"] == 1
         assert stats["messages_received"] == 1
         assert "queue_size" in stats
+        assert "dropped_events" in stats
+        assert "reconnects" in stats
+        assert stats["avg_latency_ms"] == 15.5
+        assert stats["peak_latency_ms"] == 15.5
     
     async def test_concurrent_client_operations(self, system_state_instance):
         """Test concurrent client operations are thread-safe."""
